@@ -14,6 +14,9 @@ from app.models import Base
 
 @pytest.fixture
 async def app():
+    from app.core import circuit_breaker as cb
+
+    cb._breakers.clear()  # 隔离全局熔断器状态
     engine = create_async_engine(
         "sqlite+aiosqlite://",
         connect_args={"check_same_thread": False},

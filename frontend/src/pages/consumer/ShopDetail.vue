@@ -74,12 +74,21 @@ async function checkout() {
 }
 
 const newAddr = ref({ contact: '', phone: '', address: '', lat: 30.518, lng: 114.435 })
+const reviews = ref<any[]>([])
 async function addAddress() {
   await api.post('/addresses', { ...newAddr.value, is_default: addresses.value.length === 0 })
   await load()
 }
 
-onMounted(load)
+async function loadReviews() {
+  const res = await api.get(`/merchants/${route.params.id}/reviews`)
+  reviews.value = res.items
+}
+
+onMounted(() => {
+  load()
+  loadReviews()
+})
 </script>
 
 <template>
@@ -125,6 +134,18 @@ onMounted(load)
         <button class="secondary" @click="addAddress">保存地址</button>
       </details>
       <label class="field" style="margin-top: 10px">订单备注<input v-model="remark" placeholder="少辣、放门口…" /></label>
+    </div>
+
+    <div class="card">
+      <h3 class="title">用户评价（{{ reviews.length }}）</h3>
+      <div v-for="r in reviews.slice(0, 5)" :key="r.id" style="border-bottom: 1px solid var(--border); padding: 6px 0">
+        <div class="between">
+          <span class="tag brand">{{ '★'.repeat(r.rating) }}{{ '☆'.repeat(5 - r.rating) }}</span>
+          <span class="muted small">{{ r.nickname }} · {{ r.created_at ? new Date(r.created_at).toLocaleDateString() : '' }}</span>
+        </div>
+        <p class="small" style="margin: 4px 0 0">{{ r.content }}</p>
+      </div>
+      <p class="muted small" v-if="!reviews.length">暂无评价，完成订单后可评价</p>
     </div>
 
     <div class="cart-fixed">

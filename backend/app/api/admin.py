@@ -169,6 +169,15 @@ async def audit_logs(
     }
 
 
+@router.get("/metrics")
+async def runtime_metrics(admin: Annotated[User, Depends(require_admin)] = None):
+    """运行时观测：请求指标 + 熔断器状态 + 缓存状态（M11 配套）。"""
+    from app.core.circuit_breaker import all_breaker_stats
+    from app.core.metrics import metrics
+
+    return {"http": metrics.snapshot(), "breakers": all_breaker_stats()}
+
+
 @router.get("/dashboard")
 async def dashboard(
     admin: Annotated[User, Depends(require_admin)] = None,

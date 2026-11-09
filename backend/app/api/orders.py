@@ -1,14 +1,14 @@
 """订单 API：用户侧下单/支付/取消/确认/争议/查询/追踪。"""
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_current_user, get_db, get_redis, get_settings
 from app.core.errors import PermissionDeniedError
 from app.models import MerchantProfile, Order, OrderStatus, RiderProfile, User
-from app.schemas import DisputeIn, OrderCreateIn
+from app.schemas import DisputeIn, OrderCreateIn, ReviewCreateIn
 from app.services import dispatch_service, jury_service, order_service
 
 router = APIRouter(tags=["orders"])
@@ -96,6 +96,24 @@ async def confirm(
 ):
     order = await order_service.confirm_order(db, user, order_id)
     return {"order_id": order.id, "status": order.status}
+
+
+@router.post("/orders/{order_id}/review")
+async def review(
+    order_id: int,
+    body: ReviewCreateIn,
+    request: Request,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    from app.core.cache import TieredCache
+    from app.core.deps import get_cache
+    from app.services import review_service
+
+    result = await review_service.submit_review(db, user, order_id, body.rating, body.content)
+    cache: TieredCache = await get_cache(request)
+    await cache.invalidate_prefix("merchants")
+    return result
 
 
 @router.post("/orders/{order_id}/dispute")

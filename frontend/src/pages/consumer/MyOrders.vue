@@ -3,6 +3,10 @@ import { onMounted, ref } from 'vue'
 import { api, STATUS_LABEL, yuan } from '../../api'
 
 const orders = ref<any[]>([])
+const reviewFor = ref<number | null>(null)
+const reviewRating = ref(5)
+const reviewContent = ref('')
+const reviewMsg = ref('')
 
 async function load() {
   const res = await api.get('/orders?scope=consumer&size=50')
@@ -12,6 +16,21 @@ async function load() {
 async function confirm(id: number) {
   await api.post(`/orders/${id}/confirm`)
   await load()
+}
+
+async function submitReview() {
+  if (!reviewFor.value) return
+  reviewMsg.value = ''
+  try {
+    await api.post(`/orders/${reviewFor.value}/review`, {
+      rating: reviewRating.value, content: reviewContent.value,
+    })
+    reviewMsg.value = '评价成功，感谢反馈'
+    reviewFor.value = null
+    reviewContent.value = ''
+  } catch (e: any) {
+    reviewMsg.value = e.message
+  }
 }
 
 onMounted(load)
@@ -35,9 +54,25 @@ onMounted(load)
         <div class="row">
           <router-link :to="`/orders/${o.id}/track`"><button class="secondary">追踪</button></router-link>
           <button v-if="o.status === 'DELIVERED'" @click="confirm(o.id)">确认收货</button>
+          <button v-if="o.status === 'COMPLETED'" class="ghost" @click="reviewFor = o.id">评价</button>
         </div>
       </div>
       <p class="muted small" v-if="o.cancel_reason">关闭原因：{{ o.cancel_reason }}</p>
+    </div>
+
+    <div class="card" v-if="reviewFor">
+      <h3 class="title">评价订单</h3>
+      <div class="row" style="margin-bottom: 8px">
+        <button v-for="n in 5" :key="n" class="ghost" @click="reviewRating = n" :style="{ background: n <= reviewRating ? 'var(--brand)' : '' }">
+          {{ n }} 星
+        </button>
+      </div>
+      <textarea v-model="reviewContent" rows="2" placeholder="口味、分量、包装…" style="margin-bottom: 8px"></textarea>
+      <div class="row">
+        <button @click="submitReview">提交评价</button>
+        <button class="secondary" @click="reviewFor = null">取消</button>
+      </div>
+      <div class="ok" v-if="reviewMsg">{{ reviewMsg }}</div>
     </div>
     <p class="muted" v-if="!orders.length">还没有订单，去点一单吧</p>
   </div>

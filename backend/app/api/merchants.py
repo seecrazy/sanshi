@@ -1,11 +1,12 @@
 """商家：公开浏览 + 入驻申请 + 自营（资料/商品/订单看板/接单拒单）。"""
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.deps import get_current_user, get_db, get_redis, get_settings, require_merchant
+from app.core.cache import TieredCache
+from app.core.deps import get_cache, get_current_user, get_db, get_redis, get_settings, require_merchant
 from app.core.errors import BizError, NotFoundError
 from app.models import Goods, GoodsSku, MerchantProfile, Order, OrderStatus, User
 from app.schemas import GoodsIn, GoodsUpdateIn, MerchantApplyIn, MerchantProfileIn, RejectIn
@@ -40,19 +41,29 @@ def goods_out(g: Goods) -> dict:
 
 @router.get("/merchants")
 async def list_merchants(
+    request: Request,
     keyword: str = "",
     sort: str = "rating",
     page: int = 1,
     size: int = 20,
     db: Annotated[AsyncSession, Depends(get_db)] = None,
 ):
-    stmt = select(MerchantProfile).where(MerchantProfile.status == "ACTIVE", MerchantProfile.is_open.is_(True))
-    if keyword:
-        stmt = stmt.where(MerchantProfile.name.contains(keyword))
-    order_col = MerchantProfile.monthly_sales.desc() if sort == "sales" else MerchantProfile.rating.desc()
-    stmt = stmt.order_by(order_col).offset((page - 1) * size).limit(size)
-    rows = (await db.execute(stmt)).scalars().all()
-    return [merchant_out(m) for m in rows]
+    cache: TieredCache = await get_cache(request)
+
+    async def loader():
+        stmt = select(MerchantProfile).where(
+            MerchantProfile.status == "ACTIVE", MerchantProfile.is_open.is_(True)
+        )
+        if keyword:
+            stmt = stmt.where(MerchantProfile.name.contains(keyword))
+        order_col = MerchantProfile.monthly_sales.desc() if sort == "sales" else MerchantProfile.rating.desc()
+        stmt = stmt.order_by(order_col).offset((page - 1) * size).limit(size)
+        rows = (await db.execute(stmt)).scalars().all()
+        return [merchant_out(m) for m in rows]
+
+    return await cache.get_or_load(
+        f"merchants:{keyword}:{sort}:{page}:{size}", loader, redis_ttl=30
+    )
 
 
 @router.get("/merchants/{merchant_id}")
@@ -64,14 +75,30 @@ async def merchant_detail(merchant_id: int, db: Annotated[AsyncSession, Depends(
 
 
 @router.get("/merchants/{merchant_id}/goods")
-async def merchant_goods(merchant_id: int, db: Annotated[AsyncSession, Depends(get_db)]):
-    stmt = (
-        select(Goods)
-        .where(Goods.merchant_id == merchant_id, Goods.status != "OFF")
-        .order_by(Goods.sort, Goods.id)
-    )
-    rows = (await db.execute(stmt)).scalars().unique().all()
-    return [goods_out(g) for g in rows]
+async def merchant_goods(
+    merchant_id: int,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    cache: TieredCache = await get_cache(request)
+
+    async def loader():
+        stmt = (
+            select(Goods)
+            .where(Goods.merchant_id == merchant_id, Goods.status != "OFF")
+            .order_by(Goods.sort, Goods.id)
+        )
+        rows = (await db.execute(stmt)).scalars().unique().all()
+        return [goods_out(g) for g in rows]
+
+    return await cache.get_or_load(f"goods:{merchant_id}", loader, redis_ttl=60)
+
+
+@router.get("/merchants/{merchant_id}/reviews")
+async def merchant_reviews(merchant_id: int, db: Annotated[AsyncSession, Depends(get_db)]):
+    from app.services import review_service
+
+    return {"items": await review_service.merchant_reviews(db, merchant_id)}
 
 
 # ---- 入驻与自营 ----
@@ -106,6 +133,7 @@ async def my_profile(merchant: Annotated[tuple[User, MerchantProfile], Depends(r
 @self_router.put("/profile")
 async def update_profile(
     body: MerchantProfileIn,
+    request: Request,
     merchant: Annotated[tuple[User, MerchantProfile], Depends(require_merchant)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
@@ -113,12 +141,16 @@ async def update_profile(
     for k, v in body.model_dump(exclude_none=True).items():
         setattr(m, k, v)
     await db.commit()
+    cache: TieredCache = await get_cache(request)
+    await cache.invalidate_prefix("merchants")
+    await cache.invalidate_prefix(f"goods:{m.id}")
     return merchant_out(m)
 
 
 @self_router.post("/goods")
 async def create_goods(
     body: GoodsIn,
+    request: Request,
     merchant: Annotated[tuple[User, MerchantProfile], Depends(require_merchant)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
@@ -129,6 +161,8 @@ async def create_goods(
     )
     db.add(goods)
     await db.commit()
+    cache: TieredCache = await get_cache(request)
+    await cache.invalidate_prefix(f"goods:{merchant[1].id}")
     return goods_out(goods)
 
 
@@ -153,6 +187,7 @@ async def _own_goods(db: AsyncSession, merchant_id: int, goods_id: int) -> Goods
 async def update_goods(
     goods_id: int,
     body: GoodsUpdateIn,
+    request: Request,
     merchant: Annotated[tuple[User, MerchantProfile], Depends(require_merchant)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
@@ -167,6 +202,8 @@ async def update_goods(
         for sku in skus:
             goods.skus.append(GoodsSku(**sku))
     await db.commit()
+    cache: TieredCache = await get_cache(request)
+    await cache.invalidate_prefix(f"goods:{merchant[1].id}")
     # 重新查询以拿到最新 selectin 加载的 SKU 集合
     goods = (
         await db.execute(select(Goods).where(Goods.id == goods_id))
@@ -177,12 +214,15 @@ async def update_goods(
 @self_router.post("/goods/{goods_id}/toggle")
 async def toggle_goods(
     goods_id: int,
+    request: Request,
     merchant: Annotated[tuple[User, MerchantProfile], Depends(require_merchant)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     goods = await _own_goods(db, merchant[1].id, goods_id)
     goods.status = "OFF" if goods.status == "ON" else "ON"
     await db.commit()
+    cache: TieredCache = await get_cache(request)
+    await cache.invalidate_prefix(f"goods:{merchant[1].id}")
     return {"id": goods.id, "status": goods.status}
 
 

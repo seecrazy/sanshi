@@ -215,6 +215,11 @@ async def pay_order(session: AsyncSession, settings: Settings, user: User, order
     if order.pay_deadline_at and now() > ensure_aware(order.pay_deadline_at):
         raise BizError("支付超时，请重新下单")
 
+    # 外部支付网关（熔断包裹，DESIGN §10.5 / 约束 #11）：熔断打开时快速失败，不静默成功
+    from app.services import external
+
+    await external.charge(settings, order.total_cents, order.order_no)
+
     import uuid
 
     payment = Payment(

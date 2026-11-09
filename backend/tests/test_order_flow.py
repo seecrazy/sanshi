@@ -54,7 +54,7 @@ class TestOrderFlow:
         consumer = auth_headers(world["consumer"]["token"])
         merchant = auth_headers(world["merchant_user"]["token"])
 
-        r = await client.get(f"/merchants/{world['merchant_id']}/goods")
+        r = await client.get("/merchant/goods", headers=merchant)
         goods = [g for g in r.json() if g["name"] == "招牌炒饭"][0]
         assert goods["stock"] == 10
 
@@ -65,14 +65,14 @@ class TestOrderFlow:
         }, headers=consumer)
         assert r.status_code == 200
         order_id = r.json()["id"]
-        r = await client.get(f"/merchants/{world['merchant_id']}/goods")
+        r = await client.get("/merchant/goods", headers=merchant)
         assert [g for g in r.json() if g["name"] == "招牌炒饭"][0]["stock"] == 7
 
         # 支付后商家拒单 -> 退款 + 库存回补
         await client.post(f"/orders/{order_id}/pay", headers=consumer)
         r = await client.post(f"/orders/{order_id}/reject", json={"reason": "食材售罄"}, headers=merchant)
         assert r.status_code == 200 and r.json()["status"] == "REFUNDED"
-        r = await client.get(f"/merchants/{world['merchant_id']}/goods")
+        r = await client.get("/merchant/goods", headers=merchant)
         assert [g for g in r.json() if g["name"] == "招牌炒饭"][0]["stock"] == 10
 
     async def test_sold_out_rejected(self, client):

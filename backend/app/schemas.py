@@ -94,6 +94,11 @@ class RejectIn(BaseModel):
     reason: str
 
 
+class ReviewCreateIn(BaseModel):
+    rating: int  # 1-5
+    content: str = ""
+
+
 class DisputeIn(BaseModel):
     reason: str
     evidence: list[str] = []

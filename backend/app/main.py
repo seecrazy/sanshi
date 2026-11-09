@@ -9,12 +9,14 @@ from fastapi.responses import JSONResponse
 
 from app.api import api_router
 from app.config import Settings
+from app.core.cache import TieredCache
 from app.core.errors import (
     BizError,
     NotFoundError,
     PermissionDeniedError,
     StateConflictError,
 )
+from app.core.metrics import MetricsMiddleware
 from app.database import Database
 from app.jobs import start_jobs
 from app.services.outbox_service import AppContext
@@ -54,6 +56,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.db = Database(settings.database_url)
     app.state.redis = aioredis.from_url(settings.redis_url, decode_responses=True)
     app.state.hub = Hub()
+    app.state.cache = TieredCache(
+        app.state.redis, local_ttl=settings.cache_local_ttl
+    )
+    app.add_middleware(MetricsMiddleware)
 
     app.add_middleware(
         CORSMiddleware,

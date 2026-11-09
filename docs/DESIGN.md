@@ -28,10 +28,37 @@ MVP 范围：单城市、模拟支付、抢单模式（+管理端手动派单预
 - outbox 分发延迟不可接受 → 引入 RabbitMQ，`outbox_service.dispatch` 换实现；
 - 自动派单 → `dispatch_service` 增加策略类（v2 策略模式保留）。
 
+### 2.1 系统架构图
+
+```mermaid
+flowchart LR
+    subgraph clients["四端"]
+        C["用户端"]
+        M["商家端"]
+        R["骑手端"]
+        A["管理端"]
+    end
+    C & M & R & A --> GW["HTTP / WebSocket<br/>(JWT 鉴权 · 限流 · 指标)"]
+    GW --> API["FastAPI 路由层 api/*"]
+    API --> SVC["服务层 services/*<br/>订单状态机 · 调度 · 治理 · 计票纯函数"]
+    SVC --> PG[("PostgreSQL 22张表")]
+    SVC --> RD[("Redis<br/>GEO·锁·限流·离线队列·席位池·L2缓存")]
+    L1["L1 本地缓存"] --> RD
+    SVC --> L1
+    SVC --> CB{"熔断器<br/>payment / sms"}
+    CB -->|"熔断打开→降级"| EXT["外部服务<br/>支付网关·短信·地图(预留)"]
+    SVC -.同事务写入.-> OB[("outbox_events")]
+    OB --> JOB["分发器 Job 2s"]
+    JOB --> WS["WS Hub 按 userId 键控"]
+    WS --> C & M & R
+    JOB --> RD
+    A -.审核/否决/重算.-> SVC
+```
+
 ## 3. 角色与功能（MVP 范围）
 
 ### 用户端
-商家列表/搜索排序、商家详情+规格+购物车（前端本地）、下单（地址/备注/餐具/ETA 展示）、模拟支付、订单追踪（WebSocket 驱动）、取消、发起争议（触发陪审）、共治中心（议题/表决/陪审/决议公示）。
+商家列表/搜索排序、商家详情+规格+购物车（前端本地）、下单（地址/备注/餐具/ETA 展示）、模拟支付、订单追踪（WebSocket 驱动）、取消、发起争议（触发陪审）、订单完成后评价（1-5 星，重算商家评分）、共治中心（议题/表决/陪审/决议公示）。
 
 ### 商家端
 商品 CRUD（含规格 SKU）与上下架/售罄、订单看板（WS 实时+声音提醒）、接单/拒单、店铺设置（营业开关/起送价/配送半径/出餐时长）、共治中心。
@@ -42,7 +69,7 @@ MVP 范围：单城市、模拟支付、抢单模式（+管理端手动派单预
 ### 平台管理端
 商家/骑手资质审核与封禁、议题审核、否决（强制理由）、全量订单查询、审计日志、数据看板。
 
-（评价体系 P1，MVP 不做，rating 字段预留并种子化。）
+评价体系已实现（原 P1 提前）：`reviews` 表（每 COMPLETED 订单一评，唯一约束）、`POST /orders/{id}/review`、`GET /merchants/{id}/reviews`，提交后按全量均值重算 `merchant_profiles.rating` 并失效商家列表缓存。
 
 ## 4. 数据模型（DDL 摘要）
 
@@ -114,20 +141,66 @@ CREATE INDEX idx_outbox_pending ON outbox_events(status, next_retry_at);
 
 ## 5. 订单状态机（修订版）
 
-```
-PENDING_PAYMENT ──支付成功──▶ PAID ──自动──▶ PENDING_ACCEPT ──商家接单──▶ ACCEPTED ──骑手抢单──▶ ASSIGNED
-      │                                        │        │                    │                    │
-   用户取消                              商家拒单/超时   用户取消            发起争议             取餐打卡
-      ▼                                        ▼        ▼                    ▼                    ▼
-  CANCELLED ◀────────────────────────────── REFUNDED ◀──────┘            DISPUTED ◀─┐         PICKED
-                                                                                   │(ACCEPTED/ASSIGNED/PICKED
-ASSIGNED ──送达打卡──▶ DELIVERED ──用户确认/超时自动──▶ COMPLETED                        │ /DELIVERED 均可发起)
-                                                                                   │
-                                       DISPUTED ──陪审裁决:支持退款──▶ REFUNDED      │
-                                                └─裁决:驳回──▶ 恢复 pre_dispute_status┘
+### 5.1 状态图
+
+```mermaid
+stateDiagram-v2
+    [*] --> PENDING_PAYMENT: 下单(扣库存)
+    PENDING_PAYMENT --> PAID: 支付成功(幂等)
+    PENDING_PAYMENT --> CANCELLED: 用户取消 / 支付超时15min
+    PAID --> PENDING_ACCEPT: 自动(设接单截止10min)
+    PENDING_ACCEPT --> ACCEPTED: 商家接单
+    PENDING_ACCEPT --> REFUNDED: 拒单 / 接单超时 / 用户取消
+    ACCEPTED --> ASSIGNED: 骑手抢单(条件UPDATE)
+    ACCEPTED --> DISPUTED: 发起争议
+    ASSIGNED --> PICKED: 取餐打卡
+    ASSIGNED --> DISPUTED: 发起争议
+    PICKED --> DELIVERED: 送达打卡(拍照)
+    PICKED --> DISPUTED: 发起争议
+    DELIVERED --> COMPLETED: 用户确认 / 24h自动
+    DELIVERED --> DISPUTED: 送达后2h内
+    DISPUTED --> REFUNDED: 陪审裁决支持退款
+    DISPUTED --> ACCEPTED: 裁决驳回·恢复
+    DISPUTED --> ASSIGNED: 裁决驳回·恢复
+    DISPUTED --> PICKED: 裁决驳回·恢复
+    DISPUTED --> DELIVERED: 裁决驳回·恢复
+    COMPLETED --> [*]
+    CANCELLED --> [*]
+    REFUNDED --> [*]
 ```
 
-**迁移表（唯一事实源，代码在 `order_service.TRANSITIONS`）：**
+### 5.2 主链路时序图
+
+```mermaid
+sequenceDiagram
+    actor U as 用户
+    participant API as FastAPI
+    participant ST as 状态机
+    participant PAY as 支付网关(熔断)
+    participant MQ as Outbox+分发器
+    participant M as 商家(WS)
+    participant R as 骑手(WS)
+
+    U->>API: POST /orders(地址/起送价/库存校验)
+    API->>ST: PENDING_PAYMENT(条件扣库存)
+    U->>API: POST /pay
+    API->>PAY: charge(3s超时,熔断包裹)
+    PAY-->>API: 成功
+    API->>ST: PAID → PENDING_ACCEPT(同事务)
+    API->>MQ: order.paid
+    MQ->>M: WS新订单提醒+短信兜底
+    M->>API: accept
+    API->>ST: ACCEPTED(进抢单池)
+    MQ->>R: pool.updated(范围内骑手)
+    R->>API: grab(Redis锁+条件UPDATE)
+    API->>ST: ASSIGNED(写rider_id)
+    R->>API: arrive/pickup/deliver 打卡
+    API->>ST: PICKED → DELIVERED
+    U->>API: confirm
+    API->>ST: COMPLETED
+```
+
+### 5.3 迁移表（唯一事实源，代码在 `order_service.TRANSITIONS`）
 
 | from | to | 触发 | 附带动作 |
 |---|---|---|---|
@@ -225,7 +298,33 @@ delivery_task 独立子状态机（CREATED→ARRIVED→PICKED→DELIVERED）；�
 | 轨迹清理 | 24h | 删除 30 天前 rider_track_logs |
 
 ### 10.4 降级
-Redis 不可用：GEO/席位池查询降级 DB（延迟上升但可用）、限流失败放行（fail-open + 告警日志）、离线队列跳过（消息可由 outbox 重投）。模拟支付/地图（预留）调用一律 3s 超时。
+Redis 不可用：GEO/席位池查询降级 DB（延迟上升但可用）、限流失败放行（fail-open + 告警日志）、离线队列跳过（消息可由 outbox 重投）、两级缓存跳过 L2 直落 DB。模拟支付/地图（预留）调用一律 3s 超时。
+
+### 10.5 熔断器（已实现 `core/circuit_breaker.py`）
+所有第三方调用必须经 `breaker.call()`（约束 #11）：
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| timeout | 3s | 单次调用超时，快速失败 |
+| min_calls / failure_rate | 20 / 50% | 滚动窗口 60s 内达标即熔断 |
+| cooldown | 30s | OPEN 持续时长，之后 HALF_OPEN |
+| probes | 3 | HALF_OPEN 探测全成功才 CLOSED，任一失败立即重新 OPEN |
+
+- 状态机：CLOSED → OPEN → HALF_OPEN → CLOSED/OPEN；
+- 已接入：**支付网关**（`services/external.charge`，熔断打开时报"支付通道繁忙"，资金操作不静默降级）、**短信**（熔断/失败即跳过并记日志，通知类可降级）；地图 SDK 预留同一入口；
+- 故障注入：`SANSHI_MOCK_PAY_FAIL_RATE`（压测/演示）；
+- 观测：`GET /admin/metrics` 返回各熔断器实时状态。
+
+### 10.6 两级缓存（已实现 `core/cache.py`）
+`L1 进程内 TTL(5s, 上限 2000 key) → L2 Redis(30~60s TTL) → DB loader`：
+
+| 数据 | L1 | L2 | 失效时机 |
+|---|---|---|---|
+| 商家列表 `merchants:*` | 5s | 30s | 商家资料变更/评分更新/审核封禁 `invalidate_prefix("merchants")` |
+| 商品列表 `goods:{merchant_id}` | 5s | 60s | 商品增改/上下架/店铺资料变更 |
+
+- Redis 故障自动跳过 L2；库存等强一致数据**不进缓存**（下单走 DB 条件扣减，公开菜单的库存展示允许秒级陈旧，商家自营视图 `/merchant/goods` 永远实时）；
+- 实测（M11）：读链路服务端 p50 0.35ms / 650 req/s 零错误。
 
 ## 11. 安全
 
@@ -236,6 +335,31 @@ Redis 不可用：GEO/席位池查询降级 DB（延迟上升但可用）、限�
 - 隐私：骑手轨迹仅保留 30 天；陪审员身份对当事人不可见（案件只展示角色构成）。
 
 ## 12. 治理域
+
+### 12.0 治理总流程图
+
+```mermaid
+flowchart TD
+    subgraph seats["席位（资格重算 Job·每 6h）"]
+        SR["CONSUMER 近30天完成≥3单"]
+        RM["RIDER 送达≥20 且评分≥4.5"]
+        MC["MERCHANT 营业≥30天 且评分≥4.5"]
+    end
+    SR & RM & MC --> POOL[("gov_seats + Redis Set seat:role")]
+    POOL -->|持席者发起| P1["议题 REVIEWING"]
+    P1 -->|Admin 审核| P2["OPEN 表决 72h"]
+    P2 --> V["一方一票 FOR/AGAINST/ABSTAIN<br/>多席位按 rider>merchant>consumer 取角色"]
+    V --> T["纯函数 tally()<br/>加权支持度 + 各角色法定人数 + 少数保护抬阈值"]
+    T --> D1["决议公示 Decision(ISSUE) + 广播"]
+    D1 --> VT{"Admin 48h 内否决?<br/>强制理由"}
+    VT -->|是| AV["Decision(VETO) + 审计 + 决议推翻"]
+    P2 -.用户订单争议.-> J1["案件 OPEN + 分层抽选 2骑+2用+1商<br/>当事人回避"]
+    J1 --> JV["24h 表决 REFUND/REJECT<br/>可回避补抽"]
+    JV --> JD["多数决·平票退款·零票驳回"]
+    JD -->|REFUND| EX1["订单 DISPUTED→REFUNDED<br/>退款+释放库存"]
+    JD -->|REJECT| EX2["订单恢复 pre_dispute_status"]
+    EX1 & EX2 --> D2["决议公示 Decision(JURY) + 审计"]
+```
 
 ### 12.1 席位与资格（每日重算，可手动触发）
 | 角色 | 资格 |
@@ -281,7 +405,8 @@ POST /merchants/apply            GET/PUT /merchant/profile
 POST /merchant/goods             PUT /merchant/goods/{id}   POST /merchant/goods/{id}/toggle
 GET /merchant/orders?status=     POST /orders/{id}/accept|reject
 # 订单（用户）
-POST /orders                     POST /orders/{id}/pay|cancel|dispute|confirm
+POST /orders                     POST /orders/{id}/pay|cancel|dispute|confirm|review
+GET /merchants/{id}/reviews       GET /admin/metrics
 GET /orders?scope=               GET /orders/{id}           GET /orders/{id}/track
 # 骑手
 POST /riders/apply               POST /rider/status|location
@@ -326,9 +451,9 @@ Vue3 SPA，目录对齐 v2 的 UniApp 页面树（consumer/merchant/rider/admin 
 | M6 | 议题/加权表决/计票/公示 | |
 | M7 | 陪审：抽选/回避/表决/裁决执行 | |
 | M8 | 否决与审计 | |
-| M9 | 补偿任务/限流/降级收尾 | |
+| M9 | 补偿任务/限流/降级收尾 | ✅ 含熔断器(§10.5)与两级缓存(§10.6) |
 | M10 | 前端四端联调 | |
-| M11 | 种子数据/compose 一键起/验收 | |
+| M11 | 种子数据/compose 一键起/压测验收 | ✅ scripts/loadtest.py + /admin/metrics |
 
 ## 18. 给 ZCode 的硬约束（修订版）
 
@@ -342,6 +467,7 @@ Vue3 SPA，目录对齐 v2 的 UniApp 页面树（consumer/merchant/rider/admin 
 8. 金额一律整数分；时间戳一律 UTC timestamptz。
 9. 所有治理操作（审核/否决/抽选/重算）必须落 audit_logs。
 10. 抢单池只含 `ACCEPTED` 订单；任何新入口不得把 `PAID/PENDING_ACCEPT` 订单暴露给骑手。
+11. 所有第三方调用必须经熔断器 `breaker.call()`（默认 3s 超时）包裹，熔断打开时资金类操作快速失败、通知类操作降级跳过；禁止业务代码直连外部 HTTP。
 
 ## 19. 修订记录（v2 → v3）
 
@@ -357,3 +483,11 @@ Vue3 SPA，目录对齐 v2 的 UniApp 页面树（consumer/merchant/rider/admin 
 10. **分表预留方向修正**：consumer_id 取模会打散商家/骑手查询，改为 merchant 维度预留。
 11. **隐私与保留策略**：骑手轨迹 30 天清理写入设计。
 12. **前端 MVP 载体**：Vue3 Web SPA 对齐 UniApp 页面树（开发/演示），产品化迁移路径说明。
+
+### v3.1（M9/M11 补全，2026-11-09）
+
+13. **熔断器落地**（§10.5）：CLOSED/OPEN/HALF_OPEN 状态机组件，支付网关与短信实际接入，`SANSHI_MOCK_PAY_FAIL_RATE` 故障注入，测试覆盖熔断-降级-探测恢复全路径。
+14. **两级缓存落地**（§10.6）：L1 进程内 + L2 Redis，商家/商品列表接入，写路径主动失效；库存等强一致数据不进缓存。
+15. **评价体系提前实现**（原 P1）：评价表 + 提交/查询接口 + 商家评分重算 + 缓存联动失效。
+16. **观测与压测**：请求指标中间件（p50/p95/p99、错误分类、TOP 路径）+ `GET /admin/metrics`（含熔断器状态）+ `scripts/loadtest.py`（browse/order 两场景，真实限流约束下压测）。
+17. **全部图表改用 Mermaid**（架构图/状态机图/时序图/治理流程图），替换 v2/v3 的 ASCII 图。

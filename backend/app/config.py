@@ -43,5 +43,15 @@ class Settings(BaseSettings):
     # 限流
     order_rate_per_min: int = 5
 
+    # 熔断（DESIGN §10.5）
+    mock_pay_fail_rate: float = 0.0  # 演示/压测故障注入
+    breaker_min_calls: int = 20
+    breaker_failure_rate: float = 0.5
+    breaker_timeout: float = 3.0
+
+    # 多级缓存（DESIGN §10.6）
+    cache_local_ttl: float = 5.0
+    cache_redis_ttl: int = 30
+
 
 settings = Settings()

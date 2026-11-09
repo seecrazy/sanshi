@@ -62,6 +62,11 @@ async def _handle_order_event(ctx: AppContext, topic: str, payload: dict) -> Non
             await notify_service.push(
                 ctx.redis, ctx.hub, users, {**payload, "type": "order.paid", "sound": True}
             )
+            # 短信兜底提醒（熔断打开自动跳过）
+            if merchant and merchant.phone:
+                from app.services import external
+
+                await external.sms_notify(merchant.phone, f"新订单 {order.order_no}，请及时接单")
         elif topic == "order.accepted":
             audience, base = await _order_audience(session, payload["order_id"])
             riders = await _active_rider_ids(session)
