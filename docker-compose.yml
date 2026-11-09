@@ -1,0 +1,43 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: sanshi
+      POSTGRES_PASSWORD: sanshi
+      POSTGRES_DB: sanshi
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sanshi"]
+      interval: 3s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      retries: 12
+
+  backend:
+    build: ./backend
+    environment:
+      SANSHI_DATABASE_URL: postgresql+asyncpg://sanshi:sanshi@postgres:5432/sanshi
+      SANSHI_REDIS_URL: redis://redis:6379/0
+      SANSHI_JWT_SECRET: change-me-in-prod
+      SANSHI_AUTO_CREATE: "1"
+      SANSHI_JOBS_ENABLED: "1"
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  pgdata:
