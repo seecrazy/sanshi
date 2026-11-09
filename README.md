@@ -11,9 +11,9 @@
 | 后端 | Python 3.11+ · FastAPI 单体 · SQLAlchemy 2.0 (async) |
 | 数据 | PostgreSQL 16（测试用 SQLite）· Redis 7（GEO/锁/限流/离线队列/席位池/L2 缓存） |
 | 消息 | 事务发件箱（Outbox 表 + 分发器），预留 RabbitMQ 升级位 |
-| 实时 | FastAPI WebSocket（首消息鉴权 + 离线队列补偿） |
+| 实时 | FastAPI WebSocket（首消息鉴权 + 离线队列 + **Redis 跨节点扇出**） |
 | 可靠性 | 熔断器（支付/短信，CLOSED→OPEN→HALF_OPEN）· 两级缓存（L1 5s → L2 Redis 30~60s）· 8 个补偿 Job |
-| 前端 | Vue 3 + Vite + TS + Pinia（页面结构对齐 UniApp 迁移路径） |
+| 前端 | Vue 3 + Vite + TS + Pinia + **Leaflet/OSM 地图**（免 key；UniApp 迁移指南见 docs/） |
 
 ## 快速开始
 
@@ -62,12 +62,22 @@ SANSHI_MOCK_PAY_FAIL_RATE=0.6 uvicorn app.main:app  # 支付几次后熔断打�
 | 骑手 | 13600000001 / 13600000002 | 送达 128 / 64 单持骑手席位 |
 | 席位用户 | 1360000001x / 1390000001x / 1370000001x | 表决与陪审演示 |
 
+## 一键部署（Docker）
+
+```bash
+docker compose up --build          # postgres + redis + backend + frontend(nginx)
+# 前端 http://localhost:5173，API 文档 http://localhost:8000/docs
+docker compose exec backend python -m app.seed   # 种子数据
+docker compose up --scale backend=3              # 多实例（WS 已支持跨节点扇出）
+```
+
 ## 演示一条完整链路
 
-1. 用户端登录 → 选商家 → 加购物车 → 下单（模拟支付，扣库存）
+1. 用户端登录 → 选商家（可按距离排序）→ 加购物车 → 下单（模拟支付，扣库存）
 2. 商家看板收 WS 新订单提醒（声音）→ 接单（10 分钟超时自动退款）
-3. 骑手上线 → 抢单池（仅含商家已接单的订单）→ 抢单 → 到店/取餐/送达打卡
-4. 用户确认收货；订单完成后可 1-5 星评价，商家评分实时重算
+3. 骑手上线（浏览器真实 GPS 定位上报）→ 抢单池（仅含商家已接单的订单）→ 抢单 → 导航到店 → 到店/取餐/送达打卡
+   （管理端可 `SANSHI_DISPATCH_MODE=auto` 开启超时自动派单，或手动派单）
+4. 用户实时地图追踪（取餐点/目的地/骑手三点标记）→ 确认收货 → 1-5 星评价，商家评分实时重算
 5. 用户对问题订单发起争议 → 三方陪审 24h 内裁决 → 自动退款 / 驳回恢复
 6. 共治中心：骑手发起「恶劣天气配送费上浮」议题 → 管理员审核 → 三方加权表决（少数角色保护）→ 决议公示 → 管理员可带理由否决（进审计）
 

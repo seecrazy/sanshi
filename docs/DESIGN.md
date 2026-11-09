@@ -24,9 +24,9 @@ MVP 范围：单城市、模拟支付、抢单模式（+管理端手动派单预
 | 部署 | docker-compose（postgres + redis + backend） | |
 
 **演进路径**（触发条件明确，不超前实现）：
-- 长连接 > 2 万 → 独立 WS 网关（Go/Netty）+ Redis Pub/Sub 扇出；
+- 长连接 > 2 万（单实例 asyncio 上限）→ 独立 WS 网关（Go/Netty）；Redis 跨节点扇出 v3.2 已实现；
 - outbox 分发延迟不可接受 → 引入 RabbitMQ，`outbox_service.dispatch` 换实现；
-- 自动派单 → `dispatch_service` 增加策略类（v2 策略模式保留）。
+- ~~自动派单~~（v3.2 已实现 auto 模式，DESIGN §7）
 
 ### 2.1 系统架构图
 
@@ -245,7 +245,8 @@ sequenceDiagram
 - 池排序：骑手当前位置到商家距离升序；过滤距离 > 8km（可配置）。
 - **并发防护双层**：Redis 锁 `grab:{order_id}`（TTL 10s，仅优化）+ **条件 UPDATE 为最终权威**（`WHERE status='ACCEPTED' AND rider_id IS NULL`）。锁失效也不超派。
 - 骑手负载：进行中任务（ASSIGNED/PICKED）数 < max_concurrent(3) 才可抢。
-- 手动派单（Admin，MVP 预留）：同条件 UPDATE，actor 不同而已。
+- **自动派单（v3.2 已实现）**：`SANSHI_DISPATCH_MODE=auto` 时，商家接单后 `auto_assign_after_seconds`（默认 60s）无人抢，补偿 Job 自动派给距离最近且未超载的在线骑手（逐候选尝试条件 UPDATE，失败自动换下一位）；默认仍为 `grab` 抢单模式。
+- 手动派单（Admin）：`POST /admin/orders/{id}/assign`，同条件 UPDATE 权威 + 审计。抢单/自动派/手动派共用 `dispatch_service.try_assign()` 单一入口（约束 #4）。
 - 位置：骑手每 10s 上报 → `GEOADD rider:geo:{city}` + rider_profiles.lat/lng + rider_track_logs（30 天保留后清理）。Redis 不可用降级：读 profiles 表坐标。
 
 ## 8. 履约打卡
@@ -268,8 +269,8 @@ delivery_task 独立子状态机（CREATED→ARRIVED→PICKED→DELIVERED）；�
 ### 9.4 收口
 业务代码**禁止**触 hub/WebSocket，一律 `notify_service.push`（由 outbox 分发器调用）。
 
-### 9.5 多节点演进
-节点间扇出改 Redis Pub/Sub（`sanshi:notify` 频道，消息携带 user_ids），hub 结构不变。MVP 单节点不启用。
+### 9.5 多节点扇出（v3.2 已实现并双实例验证）
+节点间扇出走 Redis Pub/Sub（`sanshi:notify` 频道）：`notify_service.push` 本地直发 + 发布频道（携带 instance_id）；各实例的 `fanout_listener` 长驻订阅，收到其它实例的消息投递本地连接（按 instance_id 跳过自己防回环）；全节点未送达才由发起节点写离线队列。`SANSHI_WS_FANOUT=0` 可关闭（单实例）。实测：双 uvicorn 实例，骑手 WS 连节点2，业务全打节点1，事件经 Redis 扇出 200ms 内送达。多实例部署：`docker compose up --scale backend=3`。
 
 ## 10. 可靠性
 
@@ -419,7 +420,8 @@ POST /gov/issues/{id}/vote       GET /gov/decisions
 GET /gov/jury/tasks              POST /gov/jury/{case_id}/vote|recuse
 # 管理
 POST /admin/merchants/{id}/review|ban    POST /admin/riders/{id}/review|ban
-POST /admin/issues/{id}/review|veto      GET /admin/orders|audit-logs|dashboard
+POST /admin/issues/{id}/review|veto      GET /admin/orders|audit-logs|metrics|dashboard
+POST /admin/orders/{id}/assign         # 手动派单
 POST /admin/gov/recalc-seats
 # 实时
 WS /ws
@@ -491,3 +493,10 @@ Vue3 SPA，目录对齐 v2 的 UniApp 页面树（consumer/merchant/rider/admin 
 15. **评价体系提前实现**（原 P1）：评价表 + 提交/查询接口 + 商家评分重算 + 缓存联动失效。
 16. **观测与压测**：请求指标中间件（p50/p95/p99、错误分类、TOP 路径）+ `GET /admin/metrics`（含熔断器状态）+ `scripts/loadtest.py`（browse/order 两场景，真实限流约束下压测）。
 17. **全部图表改用 Mermaid**（架构图/状态机图/时序图/治理流程图），替换 v2/v3 的 ASCII 图。
+
+### v3.2（产品化收尾，2026-11-10）
+
+18. **WS 跨节点扇出落地**（§9.5）：Redis Pub/Sub + instance_id 防回环，双实例真实验证；多实例水平扩展就绪。
+19. **自动派单落地**（§7）：grab/auto 双模式可配，超时自动指派最近骑手；管理端手动派单接口；三者共用 try_assign 单一权威入口。
+20. **地图落地**：追踪页 Leaflet + OSM（免 key），取餐点/目的地/骑手三点实时标记（浏览器实测瓦片与标记渲染）；骑手端浏览器 Geolocation 真实定位上报（回退模拟）+ 高德导航跳转；商家列表按用户定位距离排序。
+21. **部署收尾**：前端 Dockerfile（多阶段构建 + Nginx，`/api` 反代 + WS 升级头），`docker compose up --build` 一键起完整栈；UniApp 迁移指南见 `docs/UNIAPP_MIGRATION.md`。

@@ -20,7 +20,7 @@
 
 ## 测试与质量
 
-- **pytest：34 个用例全绿**（状态机迁移表 / 计票纯函数 / 抢单并发 / 订单全链路 / 治理与陪审 / 发件箱与限流 / 熔断-降级-恢复 / 缓存命中与失效 / 评价规则）
+- **pytest：39 个用例全绿**（状态机迁移表 / 计票纯函数 / 抢单并发 / 订单全链路 / 治理与陪审 / 发件箱与限流 / 熔断-降级-恢复 / 缓存命中与失效 / 评价规则 / WS 扇出防回环 / 自动派单 / 手动派单 / 距离排序）
 - 前端 `vite build` 通过（15 页面，首包 gzip 41.9KB）
 - 真实环境 e2e（SQLite + 真 Redis）：下单→支付→接单→并发抢单（200/409）→打卡→争议→5 人陪审表决→驳回恢复 ASSIGNED→决议公示；发件箱事件全部 PROCESSED
 
@@ -40,16 +40,27 @@ cd backend && .venv/bin/python ../scripts/loadtest.py --scenario browse --users 
 cd backend && .venv/bin/python ../scripts/loadtest.py --scenario order --users 20 --duration 60   # 含真实限流(5单/分钟/用户)
 ```
 
-## 待办（产品化阶段）
+## 产品化收尾（2026-11-10，v3.2）
 
-- [ ] 地图 SDK 接入（当前坐标/文字展示；高德 key 配置后替换 `track` 页地图区）
-- [ ] UniApp 迁移（页面树已对齐：consumer/merchant/rider/governance）
-- [ ] 生产部署：Postgres + 多实例 + WS 网关拆分（触发条件见 DESIGN §2）
-- [ ] RabbitMQ 替换 outbox 分发器（触发条件见 DESIGN §2）
-- [ ] 骑手端接原生定位（当前演示为 10s 模拟上报）
-- [ ] 自动派单策略（抢单已就绪，策略位预留 `dispatch_service`）
+| 项 | 状态 | 验收 |
+|---|---|---|
+| WS 跨节点扇出（Redis Pub/Sub） | ✅ | 单测（双 hub 防回环）+ **双 uvicorn 实例真实验证**：骑手 WS 连节点2，业务打节点1，事件 200ms 内跨节点送达 |
+| 自动派单（grab/auto 双模式） | ✅ | 超时自动派最近骑手，测试覆盖候选排序与窗口判断 |
+| 管理端手动派单 | ✅ | `POST /admin/orders/{id}/assign`，与抢单/自动派共用 try_assign 权威入口，重复派单 409 |
+| 地图（Leaflet + OSM 免 key） | ✅ | 浏览器实测：追踪页 894×320 地图、8/8 瓦片真实加载、取餐点+目的地双标记、WS 驱动骑手标记 |
+| 骑手真实定位 | ✅ | 浏览器 Geolocation 10s 上报（拒绝授权自动回退模拟），高德骑行导航一键跳转 |
+| 商家列表距离排序 | ✅ | 用户定位 -> 后端 haversine 排序（缓存键含坐标） |
+| 一键部署 | ✅ | 前端多阶段构建 + Nginx（/api 反代 + WS 升级），`docker compose up --build` 完整栈；多实例 `--scale backend=3` |
+| UniApp 迁移 | 📄 | 迁移指南 [UNIAPP_MIGRATION.md](UNIAPP_MIGRATION.md)（逐层替换表 + 页面映射；小程序运行验证需 HBuilderX，超出本环境） |
+
+## 有意保留（设计原则：触发条件明确，不超前实现）
+
+- RabbitMQ 替换 outbox 分发器：触发条件 = 分发延迟不可接受（当前轮询 2s 足够）；接口已预留，见 DESIGN §2/§10.1
+- 独立 WS 网关（Go/Netty）：触发条件 = 单实例长连接 > 2 万；跨节点扇出已就绪，当前直接水平加实例
+- 真实支付/地图 SDK 商用 key：`services/external.py` 即替换点（熔断器已就位）
 
 ## 变更日志
 
-- 2026-11-09（第 2 次提交）：M9 熔断器 + 两级缓存、评价体系、指标中间件、压测脚本；DESIGN 图表全部 Mermaid 化（v3.1，修订记录 #13-#17）。
+- 2026-11-10（第 3 次提交，v3.2）：WS 跨节点扇出、自动/手动派单、Leaflet 地图、真实定位与导航、距离排序、一键部署、UniApp 迁移指南；39 测试全绿 + 浏览器实测。
+- 2026-11-09（第 2 次提交，v3.1）：M9 熔断器 + 两级缓存、评价体系、指标中间件、压测脚本；DESIGN 图表全部 Mermaid 化。
 - 2026-11-09（首提）：M1-M8 + M10 全部完成，25 测试全绿，真实环境 e2e 通过。

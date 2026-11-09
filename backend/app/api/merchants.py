@@ -43,11 +43,16 @@ def goods_out(g: Goods) -> dict:
 async def list_merchants(
     request: Request,
     keyword: str = "",
-    sort: str = "rating",
+    sort: str = "rating",  # rating | sales | distance
+    lat: float | None = None,
+    lng: float | None = None,
     page: int = 1,
     size: int = 20,
     db: Annotated[AsyncSession, Depends(get_db)] = None,
 ):
+    """sort=distance 时需传 lat/lng（用户定位），按距离升序。"""
+    from app.core.utils import haversine_km
+
     cache: TieredCache = await get_cache(request)
 
     async def loader():
@@ -56,13 +61,24 @@ async def list_merchants(
         )
         if keyword:
             stmt = stmt.where(MerchantProfile.name.contains(keyword))
-        order_col = MerchantProfile.monthly_sales.desc() if sort == "sales" else MerchantProfile.rating.desc()
-        stmt = stmt.order_by(order_col).offset((page - 1) * size).limit(size)
         rows = (await db.execute(stmt)).scalars().all()
-        return [merchant_out(m) for m in rows]
+        items = []
+        for m in rows:
+            d = merchant_out(m)
+            if lat is not None and lng is not None:
+                d["distance_km"] = round(haversine_km(lat, lng, m.lat, m.lng), 2)
+            items.append(d)
+        if sort == "sales":
+            items.sort(key=lambda x: -x["monthly_sales"])
+        elif sort == "distance" and lat is not None:
+            items.sort(key=lambda x: x.get("distance_km", 99))
+        else:
+            items.sort(key=lambda x: -x["rating"])
+        return items[(page - 1) * size : (page - 1) * size + size]
 
+    geo_key = f"{round(lat, 3) if lat is not None else '-'}:{round(lng, 3) if lng is not None else '-'}"
     return await cache.get_or_load(
-        f"merchants:{keyword}:{sort}:{page}:{size}", loader, redis_ttl=30
+        f"merchants:{keyword}:{sort}:{geo_key}:{page}:{size}", loader, redis_ttl=30
     )
 
 

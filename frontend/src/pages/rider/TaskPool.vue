@@ -56,11 +56,29 @@ async function step(orderId: number, action: 'arrive' | 'pickup' | 'deliver') {
   }
 }
 
-// 模拟位置上报（演示用；真实 App 由地图 SDK 定时回调）
+// 位置上报：优先浏览器真实 GPS（Geolocation），不可用时回退模拟坐标
 let locTimer: number | null = null
+let geoDenied = false
 async function reportLocation() {
-  const base = { lat: 30.513 + Math.random() * 0.004, lng: 114.428 + Math.random() * 0.004 }
-  await api.post('/rider/location', base).catch(() => {})
+  let pos: { lat: number; lng: number } | null = null
+  if (!geoDenied && navigator.geolocation) {
+    pos = await new Promise((resolve) => {
+      navigator.geolocation.getCurrentPosition(
+        (p) => resolve({ lat: p.coords.latitude, lng: p.coords.longitude }),
+        () => resolve(null), // 拒绝/失败 -> 回退
+        { enableHighAccuracy: true, timeout: 3000 },
+      )
+    })
+    if (pos === null) geoDenied = true
+  }
+  if (!pos) pos = { lat: 30.513 + Math.random() * 0.004, lng: 114.428 + Math.random() * 0.004 }
+  await api.post('/rider/location', pos).catch(() => {})
+}
+
+// 导航：调起高德骑行导航（web 跳转，App 内可换 URL Scheme / uni.openLocation）
+function navigate(lat: number, lng: number, name: string) {
+  const url = `https://uri.amap.com/navigation?to=${lng},${lat},${encodeURIComponent(name)}&mode=ride&policy=1`
+  window.open(url, '_blank')
 }
 
 const offs = [
@@ -100,6 +118,7 @@ onUnmounted(() => {
           <b>#{{ t.order_no }}</b>
           <span class="tag brand" style="margin-left: 6px">{{ t.status === 'ASSIGNED' ? '待取餐' : '配送中' }}</span>
           <p class="muted small">送至：{{ t.addr_text }}</p>
+          <button class="secondary" @click="navigate(t.addr_lat, t.addr_lng, t.addr_text)" v-if="t.status === 'PICKED'">导航送达点</button>
         </div>
         <div class="row">
           <button v-if="t.status === 'ASSIGNED'" class="big secondary" @click="step(t.id, 'arrive')">到店打卡</button>
@@ -117,6 +136,10 @@ onUnmounted(() => {
           <span class="tag rider" style="margin-left: 6px">{{ t.distance_km }} km</span>
           <p class="muted small">取：{{ t.merchant_address }}</p>
           <p class="muted small">送：{{ t.dest_address }}</p>
+          <div class="row" style="margin-top: 6px">
+            <button class="secondary" @click="navigate(t.pickup_lat, t.pickup_lng, t.merchant_name)">导航到店</button>
+            <button class="secondary" @click="navigate(t.dest_lat, t.dest_lng, t.addr_text || '目的地')">导航送单</button>
+          </div>
         </div>
         <div style="text-align: right">
           <b class="tag brand">+{{ yuan(t.delivery_fee_cents) }}</b>

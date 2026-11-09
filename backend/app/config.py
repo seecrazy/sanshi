@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     # 调度
     pool_max_distance_km: float = 8.0
     rider_default_max_concurrent: int = 3
+    dispatch_mode: str = "grab"          # grab（抢单）| auto（超时自动派单）
+    auto_assign_after_seconds: int = 60  # auto 模式：商家接单后无人抢 N 秒自动派
+
+    # WebSocket
+    ws_fanout: bool = True  # 多实例 Redis Pub/Sub 扇出（单实例可关）
 
     # 治理
     voting_days: int = 3

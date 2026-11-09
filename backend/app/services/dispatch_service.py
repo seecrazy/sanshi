@@ -102,31 +102,79 @@ async def grab_order(
     await _try_lock(redis, f"grab:{order_id}")
     try:
         # 权威判定：条件 UPDATE，防并发重复接单
-        stmt = (
-            update(Order)
-            .where(Order.id == order_id, Order.status == S.ACCEPTED, Order.rider_id.is_(None))
-            .values(
-                status=S.ASSIGNED,
-                rider_id=user.id,
-                assigned_at=now(),
-                version=Order.version + 1,
-            )
-        )
-        res = await session.execute(stmt)
-        if res.rowcount == 0:
+        order = await try_assign(session, order_id, user.id)
+        if order is None:
             raise StateConflictError("手慢了，该订单已被抢")
-        order = await session.get(Order, order_id)
-        session.add(DeliveryTask(order_id=order.id, rider_id=user.id, status="CREATED"))
         rider.working_status = "BUSY"
-        await emit_outbox(
-            session,
-            "order.assigned",
-            {"order_id": order.id, "order_no": order.order_no, "rider_id": user.id},
-        )
         await session.commit()
         return order
     finally:
         await _unlock(redis, f"grab:{order_id}")
+
+
+async def try_assign(session: AsyncSession, order_id: int, rider_user_id: int) -> Order | None:
+    """抢单/自动派/手动派共用的权威入口（约束 #4）：条件 UPDATE + 建 delivery_task + outbox。
+
+    返回更新后的订单；已被抢或状态不符返回 None（调用方决定报错或试下一位骑手）。
+    不 commit，由调用方收口。
+    """
+    stmt = (
+        update(Order)
+        .where(Order.id == order_id, Order.status == S.ACCEPTED, Order.rider_id.is_(None))
+        .values(
+            status=S.ASSIGNED,
+            rider_id=rider_user_id,
+            assigned_at=now(),
+            version=Order.version + 1,
+        )
+    )
+    res = await session.execute(stmt)
+    if res.rowcount == 0:
+        return None  # 条件 UPDATE 未命中即干净失败，无需回滚
+    order = await session.get(Order, order_id)
+    session.add(DeliveryTask(order_id=order.id, rider_id=rider_user_id, status="CREATED"))
+    await emit_outbox(
+        session,
+        "order.assigned",
+        {"order_id": order.id, "order_no": order.order_no, "rider_id": rider_user_id},
+    )
+    return order
+
+
+async def assign_candidates(
+    session: AsyncSession, settings: Settings, order: Order
+) -> list[tuple[RiderProfile, float]]:
+    """自动派单候选：在线、未超载、按到商家距离升序。"""
+    merchant = await session.get(MerchantProfile, order.merchant_id)
+    stmt = select(RiderProfile).where(
+        RiderProfile.status == "ACTIVE", RiderProfile.working_status != "OFFLINE"
+    )
+    candidates: list[tuple[RiderProfile, float]] = []
+    for rider in (await session.execute(stmt)).scalars():
+        if await active_task_count(session, rider.user_id) >= rider.max_concurrent:
+            continue
+        if merchant is None or rider.lat is None or rider.lng is None:
+            dist = 10.0  # 无坐标给兜底距离（排在有坐标者之后）
+        else:
+            dist = haversine_km(rider.lat, rider.lng, merchant.lat, merchant.lng)
+        if dist > settings.pool_max_distance_km:
+            continue
+        candidates.append((rider, dist))
+    candidates.sort(key=lambda c: c[1])
+    return candidates
+
+
+async def auto_assign_best(session: AsyncSession, settings: Settings, order: Order) -> Order | None:
+    """自动派单：把订单派给距离最近且可接单的骑手（并发下失败自动试下一位）。"""
+    for rider, _dist in await assign_candidates(session, settings, order):
+        assigned = await try_assign(session, order.id, rider.user_id)
+        if assigned is not None:
+            rider.working_status = "BUSY"
+            await session.commit()
+            logger.info("order %s auto-assigned to rider %s", order.id, rider.user_id)
+            return assigned
+    await session.commit()
+    return None
 
 
 async def _get_own_task(session: AsyncSession, user: User, order_id: int) -> tuple[Order, DeliveryTask]:

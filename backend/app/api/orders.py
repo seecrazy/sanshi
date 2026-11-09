@@ -27,6 +27,7 @@ def order_out(o: Order) -> dict:
         "total_cents": o.total_cents, "eta_minutes": o.eta_minutes,
         "remark": o.remark, "tableware_count": o.tableware_count,
         "addr_text": o.addr_text, "addr_contact": o.addr_contact, "addr_phone": o.addr_phone,
+        "addr_lat": o.addr_lat, "addr_lng": o.addr_lng,
         "created_at": o.created_at.isoformat() if o.created_at else None,
         "pay_deadline_at": o.pay_deadline_at.isoformat() if o.pay_deadline_at else None,
         "accept_deadline_at": o.accept_deadline_at.isoformat() if o.accept_deadline_at else None,
@@ -188,6 +189,7 @@ async def track(
     order = await order_service.get_order(db, order_id)
     if not await _can_view(user, db, order):
         raise PermissionDeniedError()
+    merchant = await db.get(MerchantProfile, order.merchant_id)
     rider = None
     if order.rider_id:
         rp = (
@@ -207,4 +209,10 @@ async def track(
         "eta_minutes": order.eta_minutes,
         "timeline": order_service.build_timeline(order),
         "rider": rider,
+        "merchant": {
+            "name": merchant.name if merchant else None,
+            "lat": merchant.lat if merchant else None,
+            "lng": merchant.lng if merchant else None,
+        },
+        "dest": {"lat": order.addr_lat, "lng": order.addr_lng, "text": order.addr_text},
     }

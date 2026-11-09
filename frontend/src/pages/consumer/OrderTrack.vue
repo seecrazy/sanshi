@@ -4,13 +4,12 @@ import { useRoute } from 'vue-router'
 import { api, STATUS_LABEL } from '../../api'
 import { onWsEvent } from '../../ws'
 import OrderTimeline from '../../components/OrderTimeline.vue'
+import SanshiMap from '../../components/SanshiMap.vue'
 
 const route = useRoute()
 const track = ref<any>(null)
 const disputeReason = ref('')
 const msg = ref('')
-
-const STEPS = ['paid_at', 'accepted_at', 'assigned_at', 'picked_at', 'delivereded_at', 'completed_at']
 
 async function load() {
   track.value = await api.get(`/orders/${route.params.id}/track`)
@@ -53,11 +52,24 @@ onUnmounted(off)
       <OrderTimeline :timeline="track.timeline" />
     </div>
 
+    <!-- 实时地图：取餐点 / 目的地 / 骑手位置 -->
+    <div class="card" v-if="track.merchant?.lat || track.rider?.lat">
+      <h3 class="title">实时位置</h3>
+      <SanshiMap
+        :merchant="track.merchant"
+        :dest="track.dest"
+        :rider="track.rider ? { ...track.rider, name: track.rider.nickname } : null"
+        style="height: 320px; border-radius: 8px"
+      />
+      <p class="muted small" style="margin-top: 6px">
+        绿=取餐点 · 红=目的地 · 蓝=骑手（每 10 秒更新，WebSocket 驱动）
+      </p>
+    </div>
+
     <div class="card" v-if="track.rider">
-      <h3 class="title">骑手实时位置</h3>
+      <h3 class="title">骑手信息</h3>
       <p class="muted">
-        {{ track.rider.nickname }} · 已完成 {{ track.rider.deliveries_count }} 单 ·
-        最新坐标 {{ track.rider.lat?.toFixed(4) }}, {{ track.rider.lng?.toFixed(4) }}（每 10 秒更新）
+        {{ track.rider.nickname }} · 已完成 {{ track.rider.deliveries_count }} 单
       </p>
     </div>
 

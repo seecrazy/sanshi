@@ -7,7 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_db, get_redis, get_settings, require_admin
-from app.core.errors import BizError, NotFoundError
+from app.core.errors import BizError, NotFoundError, StateConflictError
 from app.core.utils import now
 from app.models import (
     AuditLog,
@@ -118,6 +118,36 @@ async def veto_issue(
 ):
     issue = await governance_service.veto_issue(db, admin, issue_id, body.reason)
     return {"id": issue.id, "status": issue.status, "veto_reason": issue.veto_reason}
+
+
+@router.post("/orders/{order_id}/assign")
+async def manual_assign(
+    order_id: int,
+    body: dict,
+    admin: Annotated[User, Depends(require_admin)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """管理端手动派单（用于异常订单干预）。body: {"rider_user_id": int}"""
+    from sqlalchemy import select as _select
+
+    from app.models import RiderProfile
+    from app.services import dispatch_service
+
+    rider = (
+        await db.execute(
+            _select(RiderProfile).where(RiderProfile.user_id == body.get("rider_user_id"))
+        )
+    ).scalar_one_or_none()
+    if rider is None or rider.status != "ACTIVE":
+        raise BizError("骑手不存在或未激活")
+    order = await dispatch_service.try_assign(db, order_id, rider.user_id)
+    if order is None:
+        raise StateConflictError("订单不在抢单池（已分配或状态不符）")
+    rider.working_status = "BUSY"
+    await governance_service.audit(db, admin.id, "ADMIN", "order.manual_assign", "order", order.id,
+                                   {"rider_user_id": rider.user_id})
+    await db.commit()
+    return {"order_id": order.id, "status": order.status, "rider_user_id": rider.user_id}
 
 
 @router.post("/gov/recalc-seats")

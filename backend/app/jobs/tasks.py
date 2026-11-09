@@ -44,6 +44,23 @@ async def expire_accepts_job(session, ctx: AppContext) -> None:
         logger.info("order %s refunded: merchant accept timeout", order.id)
 
 
+async def auto_dispatch_job(session, ctx: AppContext) -> None:
+    """自动派单（SANSHI_DISPATCH_MODE=auto）：商家接单后 N 秒无人抢 -> 派给最近可接单骑手。"""
+    if ctx.settings.dispatch_mode != "auto":
+        return
+    from datetime import timedelta
+
+    from app.core.utils import ensure_aware
+    from app.services import dispatch_service
+
+    cutoff = now() - timedelta(seconds=ctx.settings.auto_assign_after_seconds)
+    stmt = select(Order).where(Order.status == S.ACCEPTED, Order.rider_id.is_(None))
+    for order in (await session.execute(stmt)).scalars():
+        if order.accepted_at and ensure_aware(order.accepted_at) > cutoff:
+            continue  # 还在抢单窗口内
+        await dispatch_service.auto_assign_best(session, ctx.settings, order)
+
+
 async def auto_complete_job(session, ctx: AppContext) -> None:
     cutoff = now() - timedelta(hours=ctx.settings.complete_after_hours)
     stmt = select(Order).where(Order.status == S.DELIVERED, Order.delivered_at < cutoff)
@@ -84,6 +101,7 @@ JOB_SPECS = [
     (2, dispatch_outbox_job),
     (30, expire_payments_job),
     (30, expire_accepts_job),
+    (30, auto_dispatch_job),
     (60, auto_complete_job),
     (30, close_issues_job),
     (30, expire_juries_job),

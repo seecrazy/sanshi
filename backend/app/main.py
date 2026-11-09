@@ -1,4 +1,5 @@
 """应用工厂：create_app() 组装 DB/Redis/Hub/路由/任务。"""
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -19,6 +20,7 @@ from app.core.errors import (
 from app.core.metrics import MetricsMiddleware
 from app.database import Database
 from app.jobs import start_jobs
+from app.services.notify_service import fanout_listener
 from app.services.outbox_service import AppContext
 from app.ws.hub import Hub
 
@@ -31,6 +33,8 @@ async def _lifespan(app: FastAPI):
     tasks = []
     if settings.auto_create:
         await app.state.db.create_all()
+    if settings.ws_fanout:
+        tasks.append(asyncio.create_task(fanout_listener(app.state.redis, app.state.hub)))
     if settings.jobs_enabled:
         ctx = AppContext(
             session_factory=app.state.db.session_factory,

@@ -88,7 +88,7 @@ async def _handle_jury_created(ctx: AppContext, payload: dict) -> None:
 
 
 async def _handle_broadcast(ctx: AppContext, topic: str, payload: dict) -> None:
-    await notify_service.broadcast(ctx.hub, {**payload, "type": payload.get("topic", topic)})
+    await notify_service.broadcast(ctx.redis, ctx.hub, {**payload, "type": payload.get("topic", topic)})
 
 
 HANDLERS = {
