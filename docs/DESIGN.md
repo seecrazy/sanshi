@@ -1,6 +1,9 @@
-# 叁食（Sanshi）系统设计文档 v3（修订版）
+# 叁食（Sanshi）系统设计文档 v3.2
 
-> v3 相对 v2 的全部修改见文末「修订记录」。本文件是项目唯一设计事实源，代码实现与本文件冲突时以本文件为准并及时修订本文件。
+> 本文件是项目唯一设计事实源，代码实现与本文件冲突时以本文件为准并及时修订本文件。历史版本差异见文末「修订记录」。
+> 配套文档：[PROGRESS.md](PROGRESS.md)（进度与验收）· [UNIAPP_MIGRATION.md](UNIAPP_MIGRATION.md)（小程序迁移）
+
+**目录**：[1 概述](#1-项目概述) · [2 技术栈与架构](#2-技术栈定版消除-v2-的多栈混写) · [3 角色功能](#3-角色与功能mvp-范围) · [4 数据模型](#4-数据模型ddl-摘要) · [5 订单状态机](#5-订单状态机修订版) · [6 业务规则](#6-核心业务规则) · [7 配送调度](#7-配送调度修订先接单后进池) · [8 履约打卡](#8-履约打卡) · [9 实时推送](#9-实时推送websocket) · [10 可靠性](#10-可靠性) · [11 安全](#11-安全) · [12 治理域](#12-治理域) · [13 性能](#13-性能) · [14 API](#14-api-摘要) · [15 前端](#15-前端结构) · [16 测试](#16-测试策略) · [17 里程碑](#17-里程碑修订) · [18 硬约束](#18-给-zcode-的硬约束修订版) · [19 修订记录](#19-修订记录v2--v3)
 
 ## 1. 项目概述
 
@@ -8,7 +11,7 @@
 
 四端：用户端（Consumer）、商家端（Merchant）、骑手端（Rider）、平台管理端（Admin）。
 
-MVP 范围：单城市、模拟支付、抢单模式（+管理端手动派单预留）、Web 前端演示（结构对齐 UniApp 页面以便迁移）。
+MVP 范围（已全部实现）：单城市、模拟支付（真实 SDK 替换点见 §10.5）、抢单/自动派单/手动派单三种模式、Leaflet+OSM 实时地图、Web 四端前端（结构对齐 UniApp 页面，迁移指南见配套文档）。
 
 ## 2. 技术栈（定版，消除 v2 的多栈混写）
 
@@ -67,9 +70,10 @@ flowchart LR
 上线/下线、抢单池（按距离排序）、抢单、到店/取餐/送达打卡（拍照留痕）、位置上报（10s）、收益（日/周汇总）、共治中心。
 
 ### 平台管理端
-商家/骑手资质审核与封禁、议题审核、否决（强制理由）、全量订单查询、审计日志、数据看板。
+商家/骑手资质审核与封禁（列表/通过/驳回/封禁/解封）、议题审核、否决（强制理由）、全量订单查询、手动派单、审计日志、数据看板、运行指标（HTTP 分位数 + 熔断器状态）。
 
-评价体系已实现（原 P1 提前）：`reviews` 表（每 COMPLETED 订单一评，唯一约束）、`POST /orders/{id}/review`、`GET /merchants/{id}/reviews`，提交后按全量均值重算 `merchant_profiles.rating` 并失效商家列表缓存。
+### 评价体系（原 P1 提前实现）
+`reviews` 表（每 COMPLETED 订单限评一次，唯一约束）、`POST /orders/{id}/review`、`GET /merchants/{id}/reviews`；提交后按全量均值重算 `merchant_profiles.rating` 并失效商家列表缓存；订单列表带 `reviewed` 标记。
 
 ## 4. 数据模型（DDL 摘要）
 
@@ -292,6 +296,7 @@ delivery_task 独立子状态机（CREATED→ARRIVED→PICKED→DELIVERED）；�
 | outbox 分发 | 2s | §10.1 |
 | 支付超时 | 30s | PENDING_PAYMENT 且过期 → CANCELLED「支付超时」+释放库存 |
 | 接单超时 | 30s | PENDING_ACCEPT 且过期 → REFUNDED「商家超时未接单」 |
+| 自动派单 | 30s | auto 模式：ACCEPTED 超过派单窗口无人抢 → 派给最近可接单骑手（§7） |
 | 自动完成 | 5min | DELIVERED 超过 complete_after（默认 24h，演示环境 1h）→ COMPLETED |
 | 议题关票 | 30s | OPEN 且到期 → tally → 结果落库 + 决议公示 + 广播 |
 | 陪审截止 | 30s | OPEN 案件到期 → 按现有票裁决（零票=驳回，见 §12.4） |
@@ -390,7 +395,10 @@ flowchart TD
 
 ## 13. 性能
 
-多级缓存：商家列表 Redis 30s（变更删除）；商品 60s；席位池 Redis Set；热点本地缓存为演进项。读写分离为演进项（单库 + 索引先行）。WS 单节点 asyncio（>2 万连接再拆网关，§2）。
+- **读路径**：两级缓存（§10.6，已实现）——商家列表/商品菜单 L1 5s + L2 Redis 30~60s，写路径主动失效；实测 650 req/s 下服务端 p50 0.35ms、零错误。
+- **写路径**：库存/状态迁移走 DB 条件 UPDATE（行级并发安全，无需分布式事务）；下单链路限流 5 次/分钟/用户。
+- **连接**：WS 单实例 asyncio；跨节点扇出已就绪（§9.5），>2 万长连接再拆独立网关（§2 演进）。
+- **演进项**（触发条件明确）：读写分离（单库 + 索引先行）、热点商家本地缓存预热、Redis Lua 库存预扣。
 
 ## 14. API 摘要
 
@@ -407,8 +415,8 @@ POST /merchant/goods             PUT /merchant/goods/{id}   POST /merchant/goods
 GET /merchant/orders?status=     POST /orders/{id}/accept|reject
 # 订单（用户）
 POST /orders                     POST /orders/{id}/pay|cancel|dispute|confirm|review
-GET /merchants/{id}/reviews       GET /admin/metrics
 GET /orders?scope=               GET /orders/{id}           GET /orders/{id}/track
+GET /merchants/{id}/reviews      # 公开评价列表
 # 骑手
 POST /riders/apply               POST /rider/status|location
 GET /rider/tasks/available       POST /orders/{id}/grab
@@ -429,39 +437,49 @@ WS /ws
 
 ## 15. 前端结构
 
-Vue3 SPA，目录对齐 v2 的 UniApp 页面树（consumer/merchant/rider/admin + governance），迁移 UniApp 时页面逻辑与 store 可平移。组件：OrderTimeline、IssueCard、WeightBar。WS 客户端封装自动重连 + 事件分发。虚拟滚动/骨架屏等性能项为 P1。
+Vue3 + Vite + TS + Pinia SPA，**16 个页面**，目录对齐 UniApp 页面树（consumer/merchant/rider/governance/admin），迁移时页面逻辑与 store 可平移（指南见 UNIAPP_MIGRATION.md）：
+
+- 组件：`OrderTimeline`（状态时间轴）、`WeightBar`（治理权重条）、`SanshiMap`（Leaflet+OSM 地图，三点标记，divIcon 免图片资产）
+- 基础设施：`api.ts`（fetch 封装 + 401 全局登出）、`ws.ts`（首消息鉴权 + 25s 心跳 + 自动重连 + 事件总线）、Pinia auth store
+- 定位：骑手端浏览器 Geolocation 10s 上报（拒绝授权回退模拟）；导航跳高德骑行 URI
+- 虚拟滚动/骨架屏等性能项为 P1（列表量级未到）
 
 ## 16. 测试策略
 
 | 对象 | 方式 |
 |---|---|
 | 状态机迁移表 | 表驱动单测：全组合断言允许/拒绝 + 终态封闭 |
-| 计票纯函数 | 权重归一化、quorum 失败、少数保护抬阈值、弃权分母 |
-| 抢单并发 | 两骑手抢同单，恰好一个 200 一个 409 |
-| 订单全链路 | 集成测试（SQLite + fakeredis）：建店→商品→下单→支付→接单→抢单→打卡→送达→完成；含超时取消、拒单退款、争议陪审退款 |
-| 幂等 | 重复支付、重复表决、重复抢单 |
+| 计票纯函数 | 权重归一化、quorum 失败、少数保护抬阈值、弃权分母、陪审平票/零票 |
+| 抢单/派单并发 | 两骑手抢同单恰好一个 200 一个 409；自动派单选最近骑手；手动派单重复派 409 |
+| 订单全链路 | 集成测试（SQLite + fakeredis）：建店→商品→下单→支付→接单→抢单→打卡→送达→完成；含超时取消、拒单退款、争议陪审退款与驳回恢复 |
+| 可靠性组件 | 熔断器三态迁移与降级恢复、两级缓存命中/失效/Redis 故障降级、WS 扇出投递与防回环、发件箱离线投递、限流 |
+| 治理面板 | 资质审核列表与状态流转、订单 reviewed 标记 |
+
+**当前 41 个用例全绿**（`pytest tests/ -q`）。
 
 ## 17. 里程碑（修订）
 
-| | 内容 | 备注 |
+| | 内容 | 状态 |
 |---|---|---|
-| M1 | 骨架/认证/画像/审核 | 含本设计全部表 |
-| M2 | 商品/下单/模拟支付/接单拒单 | 库存条件扣减 |
-| M3 | 抢单池/打卡/状态机 + **最小 WS（商家推送）** | 修订：WS 提前进 M3 |
-| M4 | WS 加固：首消息鉴权/心跳/离线队列 | |
-| M5 | 席位与资格重算 | |
-| M6 | 议题/加权表决/计票/公示 | |
-| M7 | 陪审：抽选/回避/表决/裁决执行 | |
-| M8 | 否决与审计 | |
-| M9 | 补偿任务/限流/降级收尾 | ✅ 含熔断器(§10.5)与两级缓存(§10.6) |
-| M10 | 前端四端联调 | |
-| M11 | 种子数据/compose 一键起/压测验收 | ✅ scripts/loadtest.py + /admin/metrics |
+| M1 | 骨架/认证/画像/审核 | ✅ |
+| M2 | 商品/下单/模拟支付/接单拒单（库存条件扣减） | ✅ |
+| M3 | 抢单池/打卡/状态机 + 最小 WS（修订：WS 提前进 M3） | ✅ |
+| M4 | WS 加固：首消息鉴权/心跳/离线队列/跨节点扇出 | ✅ |
+| M5 | 席位与资格重算 | ✅ |
+| M6 | 议题/加权表决/计票/公示 | ✅ |
+| M7 | 陪审：抽选/回避/表决/裁决执行 | ✅ |
+| M8 | 否决与审计 | ✅ |
+| M9 | 补偿任务/限流/熔断器(§10.5)/两级缓存(§10.6) | ✅ |
+| M10 | 前端四端 16 页面联调（含地图/定位/审核面板） | ✅ |
+| M11 | 种子数据/compose 一键起/压测验收（loadtest + /admin/metrics） | ✅ |
+
+验收证据与实测数据见 [PROGRESS.md](PROGRESS.md)。
 
 ## 18. 给 ZCode 的硬约束（修订版）
 
 1. 订单状态迁移只能走 `order_service.transition()`（条件 UPDATE + version），API/Job 禁止直改 `orders.status`。
 2. 所有 WS 推送只能经 `notify_service.push()`，业务代码禁止触 hub。
-3. 库存扣减/回补只能走 `inventory.deduct()/release()`，禁止业务代码 UPDATE stock。
+3. 库存扣减/回补只能走 `order_service.deduct_inventory()/release_inventory()`（DB 条件 UPDATE 权威），禁止业务代码 UPDATE stock。
 4. 抢单最终权威是条件 UPDATE（`status='ACCEPTED' AND rider_id IS NULL`），Redis 锁只是优化层。
 5. WS 鉴权在首条消息完成；连接表按 user_id 键控；离线队列重连消费后即删。
 6. 计票与陪审裁决是纯函数（不触 DB），签名固定：`tally(votes, weights, quorum, config)`。
