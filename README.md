@@ -10,7 +10,7 @@
 [![Python](https://img.shields.io/badge/python-3.11+-3776ab.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-009688.svg?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
 [![Vue 3](https://img.shields.io/badge/Vue%203-4fc08d.svg?logo=vuedotjs&logoColor=white)](https://vuejs.org)
-[![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
+[![License: AGPL v3](https://img.shields.io/badge/license-AGPL%20v3-blue.svg)](LICENSE)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-ff69b4.svg)](https://github.com/your-org/sanshi/compare)
 
 [特性](#-特性) · [截图](#-截图) · [快速开始](#-快速开始) · [文档](#-文档) · [开发](#%EF%B8%8F-开发指南) · [架构](#-架构)
@@ -207,4 +207,6 @@ M1–M11 全部完成（41 测试全绿 · 前端构建通过 · 多轮真实环
 
 ## 📄 License
 
-[MIT](LICENSE) © 2026 Sanshi Contributors
+[AGPL-3.0](LICENSE) © 2026 Sanshi Contributors
+
+> AGPL-3.0 要求基于本项目的网络服务同样开源；若需闭源商用授权请单独联系。
