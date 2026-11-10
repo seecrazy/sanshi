@@ -129,3 +129,50 @@ class TestDistanceSort:
         dists = [m.get("distance_km") for m in items]
         assert dists == sorted(dists), "应按距离升序"
         assert all(d is not None for d in dists)
+
+
+class TestAdminProfilesAndReviewed:
+    async def test_admin_merchant_rider_lists_and_review(self, client):
+        """资质审核面板后端：待审核列表 -> 通过 -> 状态流转。"""
+        world = await setup_world(client)
+        adm = world["adm"]
+        # 新商家/骑手申请（未经 setup_world 审核）
+        from tests.conftest import register
+
+        mu = await register(client, "13799990001", "新店主")
+        ru = await register(client, "13699990001", "新骑手")
+        r = await client.post("/merchants/apply", json={"name": "待审店铺", "lat": 30.51, "lng": 114.43},
+                              headers=auth_headers(mu["token"]))
+        mid = r.json()["id"]
+        r = await client.post("/riders/apply", json={}, headers=auth_headers(ru["token"]))
+        rid = r.json()["id"]
+
+        r = await client.get("/admin/merchants?status=PENDING", headers=adm)
+        assert any(m["id"] == mid for m in r.json()["items"])
+        r = await client.get("/admin/riders?status=PENDING", headers=adm)
+        assert any(x["id"] == rid for x in r.json()["items"])
+
+        assert (await client.post(f"/admin/merchants/{mid}/review", json={"approve": True}, headers=adm)).status_code == 200
+        assert (await client.post(f"/admin/riders/{rid}/review", json={"approve": True}, headers=adm)).status_code == 200
+        r = await client.get("/admin/merchants?status=ACTIVE", headers=adm)
+        assert any(m["id"] == mid for m in r.json()["items"])
+        # 非管理员不可访问
+        assert (await client.get("/admin/merchants", headers=auth_headers(world["consumer"]["token"]))).status_code == 403
+
+    async def test_order_list_reviewed_flag(self, client):
+        """订单列表 reviewed 标记：完成未评为 false，评价后为 true。"""
+        from tests.test_m9_features import make_completed_order
+
+        world = await setup_world(client)
+        consumer = auth_headers(world["consumer"]["token"])
+        rider = auth_headers(world["rider"]["token"])
+        order_id = await make_completed_order(client, world, rider, consumer)
+
+        r = await client.get("/orders?scope=consumer", headers=consumer)
+        item = [o for o in r.json()["items"] if o["id"] == order_id][0]
+        assert item["reviewed"] is False
+
+        await client.post(f"/orders/{order_id}/review", json={"rating": 4, "content": "不错"}, headers=consumer)
+        r = await client.get("/orders?scope=consumer", headers=consumer)
+        item = [o for o in r.json()["items"] if o["id"] == order_id][0]
+        assert item["reviewed"] is True

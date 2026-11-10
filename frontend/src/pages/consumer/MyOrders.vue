@@ -54,7 +54,8 @@ onMounted(load)
         <div class="row">
           <router-link :to="`/orders/${o.id}/track`"><button class="secondary">追踪</button></router-link>
           <button v-if="o.status === 'DELIVERED'" @click="confirm(o.id)">确认收货</button>
-          <button v-if="o.status === 'COMPLETED'" class="ghost" @click="reviewFor = o.id">评价</button>
+          <button v-if="o.status === 'COMPLETED' && !o.reviewed" class="ghost" @click="reviewFor = o.id">评价</button>
+          <span class="tag" v-if="o.reviewed">已评价</span>
         </div>
       </div>
       <p class="muted small" v-if="o.cancel_reason">关闭原因：{{ o.cancel_reason }}</p>

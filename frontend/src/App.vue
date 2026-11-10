@@ -24,6 +24,7 @@ const navs = computed(() => {
   if (auth.isMerchant) {
     items.push({ to: '/merchant/board', label: '商家看板' })
     items.push({ to: '/merchant/goods', label: '商品管理' })
+    items.push({ to: '/merchant/settings', label: '店铺设置' })
   }
   if (auth.isRider) items.push({ to: '/rider/pool', label: '骑手接单' })
   if (auth.isAdmin) items.push({ to: '/admin', label: '平台管理' })

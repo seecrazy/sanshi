@@ -156,10 +156,19 @@ async def list_orders(
     total = (await db.execute(select(func.count()).select_from(stmt.subquery()))).scalar_one()
     stmt = stmt.order_by(Order.id.desc()).offset((page - 1) * size).limit(size)
     rows = (await db.execute(stmt)).all()
+    order_ids = [o.id for o, _ in rows]
+    reviewed: set[int] = set()
+    if order_ids:
+        from app.models import Review
+
+        reviewed = set(
+            (await db.execute(select(Review.order_id).where(Review.order_id.in_(order_ids)))).scalars()
+        )
     items = []
     for order, merchant in rows:
         d = order_out(order)
         d["merchant_name"] = merchant.name
+        d["reviewed"] = order.id in reviewed
         items.append(d)
     return {"total": total, "items": items}
 

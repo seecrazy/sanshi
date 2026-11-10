@@ -2,17 +2,57 @@
 import { onMounted, ref } from 'vue'
 import { api, STATUS_LABEL, yuan } from '../../api'
 
-const tab = ref<'dashboard' | 'review' | 'orders' | 'audit'>('dashboard')
+const tab = ref<'dashboard' | 'profiles' | 'review' | 'orders' | 'audit'>('dashboard')
 const dash = ref<any>(null)
 const pendingMerchants = ref<any[]>([])
 const pendingRiders = ref<any[]>([])
 const reviewingIssues = ref<any[]>([])
+const merchants = ref<any[]>([])
+const riders = ref<any[]>([])
+const profileFilter = ref('PENDING')
 const orders = ref<any[]>([])
 const auditLogs = ref<any[]>([])
 const msg = ref('')
 
 async function loadDash() {
   dash.value = await api.get('/admin/dashboard')
+}
+
+async function loadProfiles() {
+  const [m, r] = await Promise.all([
+    api.get(`/admin/merchants?status=${profileFilter.value}`),
+    api.get(`/admin/riders?status=${profileFilter.value}`),
+  ])
+  merchants.value = m.items
+  riders.value = r.items
+}
+
+async function reviewMerchant(id: number, approve: boolean) {
+  try {
+    await api.post(`/admin/merchants/${id}/review`, { approve })
+    await loadProfiles()
+  } catch (e: any) {
+    msg.value = e.message
+  }
+}
+
+async function reviewRider(id: number, approve: boolean) {
+  try {
+    await api.post(`/admin/riders/${id}/review`, { approve })
+    await loadProfiles()
+  } catch (e: any) {
+    msg.value = e.message
+  }
+}
+
+async function toggleMerchantBan(m: any) {
+  await api.post(`/admin/merchants/${m.id}/ban`, { ban: m.status !== 'BANNED' })
+  await loadProfiles()
+}
+
+async function toggleRiderBan(r: any) {
+  await api.post(`/admin/riders/${r.id}/ban`, { ban: r.status !== 'BANNED' })
+  await loadProfiles()
 }
 
 async function loadReview() {
@@ -62,7 +102,8 @@ onMounted(() => {
     <div class="ok" v-if="msg">{{ msg }}</div>
     <div class="tabs">
       <button :class="{ active: tab === 'dashboard' }" @click="tab = 'dashboard'">看板</button>
-      <button :class="{ active: tab === 'review' }" @click="tab = 'review'; loadReview()">审核</button>
+      <button :class="{ active: tab === 'profiles' }" @click="tab = 'profiles'; loadProfiles()">资质审核</button>
+      <button :class="{ active: tab === 'review' }" @click="tab = 'review'; loadReview()">议题审核</button>
       <button :class="{ active: tab === 'orders' }" @click="tab = 'orders'; loadOrders()">订单监控</button>
       <button :class="{ active: tab === 'audit' }" @click="tab = 'audit'; loadAudit()">审计日志</button>
     </div>
@@ -81,6 +122,52 @@ onMounted(() => {
       </div>
     </template>
 
+    <template v-if="tab === 'profiles'">
+      <div class="tabs">
+        <button v-for="f in ['PENDING', 'ACTIVE', 'BANNED']" :key="f"
+                :class="{ active: profileFilter === f }" @click="profileFilter = f; loadProfiles()">
+          {{ { PENDING: '待审核', ACTIVE: '已通过', BANNED: '已封禁' }[f] }}
+        </button>
+      </div>
+      <h3 class="title">商家</h3>
+      <div class="card" v-for="m in merchants" :key="m.id">
+        <div class="between">
+          <div>
+            <b>{{ m.name }}</b>
+            <span class="tag" style="margin-left: 6px">{{ { PENDING: '待审核', ACTIVE: '在营', BANNED: '已封禁' }[m.status] }}</span>
+            <p class="muted small">店主 {{ m.owner }}（{{ m.owner_phone }}）· {{ m.address }} · 评分 {{ m.rating }}</p>
+          </div>
+          <div class="row" v-if="m.status === 'PENDING'">
+            <button @click="reviewMerchant(m.id, true)">通过</button>
+            <button class="secondary" @click="reviewMerchant(m.id, false)">驳回</button>
+          </div>
+          <div class="row" v-else>
+            <button class="secondary" @click="toggleMerchantBan(m)">{{ m.status === 'BANNED' ? '解封' : '封禁' }}</button>
+          </div>
+        </div>
+      </div>
+      <p class="muted" v-if="!merchants.length">暂无该状态商家</p>
+
+      <h3 class="title">骑手</h3>
+      <div class="card" v-for="r in riders" :key="r.id">
+        <div class="between">
+          <div>
+            <b>{{ r.name }}</b>
+            <span class="tag" style="margin-left: 6px">{{ { PENDING: '待审核', ACTIVE: '在册', BANNED: '已封禁' }[r.status] }}</span>
+            <p class="muted small">{{ r.phone }} · 已送达 {{ r.deliveries_count }} 单 · 评分 {{ r.rating }} · {{ { OFFLINE: '离线', IDLE: '空闲', BUSY: '配送中' }[r.working_status] }}</p>
+          </div>
+          <div class="row" v-if="r.status === 'PENDING'">
+            <button @click="reviewRider(r.id, true)">通过</button>
+            <button class="secondary" @click="reviewRider(r.id, false)">驳回</button>
+          </div>
+          <div class="row" v-else>
+            <button class="secondary" @click="toggleRiderBan(r)">{{ r.status === 'BANNED' ? '解封' : '封禁' }}</button>
+          </div>
+        </div>
+      </div>
+      <p class="muted" v-if="!riders.length">暂无该状态骑手</p>
+    </template>
+
     <template v-if="tab === 'review'">
       <h3 class="title">议题审核</h3>
       <div class="card" v-for="i in reviewingIssues" :key="i.id">
@@ -96,7 +183,6 @@ onMounted(() => {
         </div>
       </div>
       <p class="muted" v-if="!reviewingIssues.length">暂无待审核议题</p>
-      <p class="muted small">商家/骑手资质审核接口：POST /admin/merchants/{id}/review、/admin/riders/{id}/review（MVP 由种子/脚本触发）</p>
     </template>
 
     <template v-if="tab === 'orders'">

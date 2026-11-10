@@ -150,6 +150,61 @@ async def manual_assign(
     return {"order_id": order.id, "status": order.status, "rider_user_id": rider.user_id}
 
 
+@router.get("/merchants")
+async def admin_merchants(
+    status: str = "",
+    page: int = 1,
+    size: int = 50,
+    admin: Annotated[User, Depends(require_admin)] = None,
+    db: Annotated[AsyncSession, Depends(get_db)] = None,
+):
+    stmt = select(MerchantProfile, User).join(User, User.id == MerchantProfile.user_id)
+    if status:
+        stmt = stmt.where(MerchantProfile.status == status)
+    total = (await db.execute(select(func.count()).select_from(stmt.subquery()))).scalar_one()
+    rows = (await db.execute(stmt.order_by(MerchantProfile.id.desc()).offset((page - 1) * size).limit(size))).all()
+    return {
+        "total": total,
+        "items": [
+            {
+                "id": m.id, "user_id": m.user_id, "name": m.name, "phone": m.phone,
+                "status": m.status, "rating": m.rating, "address": m.address,
+                "owner": u.nickname, "owner_phone": u.phone,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+            }
+            for m, u in rows
+        ],
+    }
+
+
+@router.get("/riders")
+async def admin_riders(
+    status: str = "",
+    page: int = 1,
+    size: int = 50,
+    admin: Annotated[User, Depends(require_admin)] = None,
+    db: Annotated[AsyncSession, Depends(get_db)] = None,
+):
+    stmt = select(RiderProfile, User).join(User, User.id == RiderProfile.user_id)
+    if status:
+        stmt = stmt.where(RiderProfile.status == status)
+    total = (await db.execute(select(func.count()).select_from(stmt.subquery()))).scalar_one()
+    rows = (await db.execute(stmt.order_by(RiderProfile.id.desc()).offset((page - 1) * size).limit(size))).all()
+    return {
+        "total": total,
+        "items": [
+            {
+                "id": r.id, "user_id": r.user_id, "status": r.status, "vehicle": r.vehicle,
+                "rating": r.rating, "deliveries_count": r.deliveries_count,
+                "working_status": r.working_status,
+                "name": u.nickname, "phone": u.phone,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r, u in rows
+        ],
+    }
+
+
 @router.post("/gov/recalc-seats")
 async def recalc_seats(
     admin: Annotated[User, Depends(require_admin)],

@@ -10,6 +10,7 @@ const routes = [
   { path: '/orders/:id/track', component: () => import('./pages/consumer/OrderTrack.vue') },
   { path: '/merchant/board', component: () => import('./pages/merchant/OrderBoard.vue') },
   { path: '/merchant/goods', component: () => import('./pages/merchant/GoodsManage.vue') },
+  { path: '/merchant/settings', component: () => import('./pages/merchant/Settings.vue') },
   { path: '/rider/pool', component: () => import('./pages/rider/TaskPool.vue') },
   { path: '/gov/issues', component: () => import('./pages/governance/IssueList.vue') },
   { path: '/gov/issues/:id', component: () => import('./pages/governance/IssueDetail.vue') },
